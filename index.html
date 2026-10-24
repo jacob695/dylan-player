@@ -277,6 +277,8 @@ main{position:relative;z-index:1;max-width:1320px;margin:0 auto;padding:28px 24p
 .swatch{width:12px;height:12px;border-radius:3px;display:inline-block}
 
 /* ---------- map ---------- */
+/* OpenStreetMap's light tiles, turned dark to match the app (labels stay readable) */
+#map.map-darken .leaflet-tile-pane{filter:invert(1) hue-rotate(180deg) brightness(.92) contrast(.88) saturate(.55)}
 #map{height:calc(100vh - 300px);min-height:380px;border-radius:var(--radius);border:1px solid var(--line);background:#0e0e0e}
 .leaflet-popup-content-wrapper,.leaflet-popup-tip{background:var(--bg-2);color:var(--text);border:1px solid var(--line-2)}
 .leaflet-popup-content{margin:12px 14px;font-family:var(--sans)}
@@ -514,9 +516,7 @@ const clone = v => JSON.parse(JSON.stringify(v));
 const icon = (name, cls = 'icon') => `<svg class="${cls}" aria-hidden="true"><use href="#i-${name}"/></svg>`;
 const CURRENT_YEAR = new Date().getFullYear();
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-// Android file viewers use content:, not file:. Neither supplies a web origin.
-const IS_FILE = !['http:', 'https:'].includes(location.protocol);
-const IS_ANDROID = /Android/i.test(navigator.userAgent);
+const IS_FILE = location.protocol === 'file:';
 const VIDEO_ID_RE = /^[A-Za-z0-9_-]{11}$/;
 
 function fmtTime(sec) {
@@ -667,7 +667,7 @@ function storageGet(key) { try { return localStorage.getItem(key); } catch { ret
 function storageSet(key, val) { try { localStorage.setItem(key, val); return true; } catch { return false; } }
 
 function emptyLibrary() {
-  return { favorites: {}, playlists: [], history: [], personalConcerts: [], seedOverrides: {}, deadLinks: {}, eras: null, settings: { ytApiKey: '' },
+  return { favorites: {}, playlists: [], history: [], personalConcerts: [], seedOverrides: {}, deadLinks: {}, eras: null, settings: { ytApiKey: '', mapStyle: 'esri-dark', cartoKey: '' },
     auto: { enabled: true, perRun: 40, lastRun: 0, queries: {}, rejected: {}, lastSummary: '' } };
 }
 function normalizeSource(s) {
@@ -737,7 +737,11 @@ function normalizeLibrary(d) {
   }
   if (isObj(d.deadLinks)) for (const k of Object.keys(d.deadLinks)) if (VIDEO_ID_RE.test(k) && d.deadLinks[k]) L.deadLinks[k] = true;
   L.eras = normalizeEraList(d.eras);
-  if (isObj(d.settings)) L.settings.ytApiKey = String(d.settings.ytApiKey || '');
+  if (isObj(d.settings)) {
+    L.settings.ytApiKey = String(d.settings.ytApiKey || '');
+    L.settings.cartoKey = String(d.settings.cartoKey || '');
+    if (['esri-dark', 'osm-dark', 'osm', 'carto-dark'].includes(d.settings.mapStyle)) L.settings.mapStyle = d.settings.mapStyle;
+  }
   if (isObj(d.auto)) {
     const a = d.auto;
     L.auto.enabled = a.enabled !== false;
@@ -1007,7 +1011,7 @@ function currentSource() { const it = currentItem(), c = currentConcert(); retur
 function chapterAt(src, t) { if (!src || !src.chapters.length) return null; let cur = null; for (const ch of src.chapters) { if (ch.t <= t + 0.5) cur = ch; else break; } return cur; }
 
 function loadYouTubeApi() {
-  if (IS_FILE || P.api !== 'idle') return;
+  if (P.api !== 'idle') return;
   P.api = 'loading';
   window.onYouTubeIframeAPIReady = () => { P.api = 'ready'; createYT(); };
   const s = document.createElement('script');
@@ -1034,7 +1038,6 @@ function buildEmbedIframe(videoId, start) {
   return f;
 }
 function createYT() {
-  if (IS_FILE) return;
   const it = currentItem();
   if (!it) return;
   P.yt = new YT.Player(buildEmbedIframe(it.videoId, P.pendingStart), {
@@ -1060,16 +1063,6 @@ function loadItem(i, autoplay = true) {
   const start = it.startAt || 0;
   it.startAt = 0;
   saveSession();
-  if (IS_FILE) {
-    // External YouTube playback cannot report progress or advance our queue.
-    clearInterval(P.tick);
-    P.hist = null; P.playing = false; P.time = start; P.duration = 0;
-    $('#video-panel').classList.add('show');
-    renderPlayerBar(); renderQueue(); markPlayingCards(); updateDetailNowPlaying();
-    showExternalPlayback();
-    if (autoplay) openCurrentOnYouTube();
-    return;
-  }
   startHistory(it, start);
   P.time = start; P.duration = 0;
   hideEmbedBlocked();
@@ -1120,35 +1113,12 @@ function showEmbedBlocked() {
   const t = Math.floor(P.time || 0);
   el.innerHTML = `<b>YouTube won't play it here (error 153)</b>
     <span class="muted">${IS_FILE
-      ? 'This local file opens videos directly in YouTube. Use the button below.'
+      ? 'This page was opened straight from a file, so YouTube can\'t tell where the player lives. The fix takes a minute — see the red box at the top of the page.'
       : 'YouTube can\'t see this page\'s web address — this happens in app preview windows and privacy setups that strip it. Open Tambourine in a normal browser tab from <code>http://localhost</code> or a website.'}</span>
     <span class="flex gap-2 flex-wrap"><a class="btn btn-gold btn-sm" href="https://www.youtube.com/watch?v=${esc(it.videoId)}${t ? '&t=' + t + 's' : ''}" target="_blank" rel="noopener">${icon('yt')}Watch on YouTube</a>
       ${IS_FILE ? '<button class="btn btn-sm" data-action="show-file-help">How to fix</button>' : ''}</span>`;
   el.classList.add('show');
   if (IS_FILE) renderFileBanner(true);
-}
-/** Local files use the public watch page instead of a failing embedded player. */
-function currentWatchUrl() {
-  const it = currentItem();
-  if (!it || !VIDEO_ID_RE.test(it.videoId)) return null;
-  const seconds = Math.max(0, Math.floor(Number(P.time) || 0));
-  return `https://www.youtube.com/watch?v=${encodeURIComponent(it.videoId)}${seconds ? '&t=' + seconds + 's' : ''}`;
-}
-function openCurrentOnYouTube() {
-  const url = currentWatchUrl();
-  if (!url) return;
-  if (P.yt && P.ready && P.playing) P.yt.pauseVideo();
-  // Keep the catalogue open. A visible link remains if the viewer blocks new tabs.
-  window.open(url, '_blank', 'noopener');
-}
-function showExternalPlayback() {
-  const url = currentWatchUrl();
-  if (!url) return;
-  const el = $('#vp-blocked');
-  el.innerHTML = `<b>Play this recording on YouTube</b>
-    <span class="muted">This local file opens videos in YouTube. Use YouTube for pause, seek and volume. Return here to choose another concert; the queue does not advance automatically.</span>
-    <a class="btn btn-gold btn-sm" href="${esc(url)}" target="_blank" rel="noopener">${icon('yt')}Open video</a>`;
-  el.classList.add('show');
 }
 function hideEmbedBlocked() { $('#vp-blocked').classList.remove('show'); }
 /** The exact command to serve this file's folder locally (paths read from the file:// URL). */
@@ -1169,25 +1139,16 @@ function renderFileBanner(expand) {
   let collapsed = false;
   try { collapsed = sessionStorage.getItem('tambourine.fileBanner') === 'min'; } catch { /* ignore */ }
   if (expand) { collapsed = false; try { sessionStorage.removeItem('tambourine.fileBanner'); } catch { /* ignore */ } }
-  if (IS_ANDROID || location.protocol !== 'file:') {
-    box.hidden = false;
-    box.innerHTML = `<div class="inner" style="padding:12px 16px">
-      <b>Local-file mode: videos open in YouTube.</b>
-      <div class="small muted">Tap Play to open the selected concert. Return here to browse or pick the next recording. In-page playback and automatic queues require this page to be served from a web address.</div>
-      <div class="small muted">Before switching files or addresses, use <button class="btn btn-sm" data-action="export">Export library</button> to keep your favorites, sources and playlists. Import that backup in Settings if they do not appear in the new file.</div>
-    </div>`;
-    return;
-  }
   const h = localServerHelp();
   box.hidden = false;
   box.innerHTML = collapsed
-    ? `<div class="inner flex items-center gap-2 flex-wrap" style="padding:10px 16px"><span class="small"><b>Local-file mode opens videos on YouTube.</b> Set up in-page playback on your computer.</span>
+    ? `<div class="inner flex items-center gap-2 flex-wrap" style="padding:10px 16px"><span class="small"><b>Videos won't play from a file.</b> One-minute fix to run Tambourine from your own computer.</span>
         <button class="btn btn-sm" data-action="show-file-help">Show me</button></div>`
     : `<div class="inner">
-      <div class="flex items-center gap-2" style="justify-content:space-between"><div class="kicker" style="color:var(--red)">Enable in-page video playback</div>
+      <div class="flex items-center gap-2" style="justify-content:space-between"><div class="kicker" style="color:var(--red)">Why videos say “Error 153”</div>
         <button class="btn btn-ghost btn-sm" data-action="hide-file-help">Hide</button></div>
-      <div style="font-family:var(--serif);font-size:20px;font-weight:700;margin:4px 0 2px">Serve Tambourine from a local web address</div>
-      <div class="small muted">You opened the file directly (the address starts with <code>file://</code>). Play opens YouTube separately. To use the embedded player and automatic queue, follow these steps:</div>
+      <div style="font-family:var(--serif);font-size:20px;font-weight:700;margin:4px 0 2px">Run Tambourine from a tiny local web server — once, about a minute</div>
+      <div class="small muted">You opened the file directly (the address starts with <code>file://</code>). YouTube only plays embedded videos on pages with a web address, so:</div>
       <ol>
         <li><b>Save your library first:</b> <button class="btn btn-sm" data-action="export">Export library</button> <span class="small muted">— what's here (auto-found concerts, favorites, playlists) lives under this address and won't follow you automatically.</span></li>
         <li>Open <b>${h.shell}</b>${h.shell === 'Terminal' ? ' (press ⌘-Space, type Terminal, press Return)' : ' (press the Windows key, type cmd, press Enter)'} and paste this, then press Return:
@@ -1295,7 +1256,6 @@ function prevItem() {
   if (session.index > 0) loadItem(session.index - 1);
 }
 function togglePlay() {
-  if (IS_FILE && currentItem()) { showExternalPlayback(); openCurrentOnYouTube(); return; }
   const it = currentItem();
   if (!it) { surprise(); return; }
   if (!P.yt || !P.ready) {
@@ -1308,7 +1268,7 @@ function togglePlay() {
   else if (st === YT.PlayerState.ENDED && session.index >= session.queue.length - 1) loadItem(session.index);
   else P.yt.playVideo();
 }
-function seekTo(t) { if (IS_FILE && currentItem()) { P.time = Math.max(0, Number(t) || 0); showExternalPlayback(); openCurrentOnYouTube(); return; } if (P.yt && P.ready) { P.yt.seekTo(t, true); P.time = t; P.yt.playVideo(); updateSeekUI(); } }
+function seekTo(t) { if (P.yt && P.ready) { P.yt.seekTo(t, true); P.time = t; P.yt.playVideo(); updateSeekUI(); } }
 /** Seek if this concert/source is already loaded, otherwise start it at t. */
 function seekOrPlay(concertId, videoId, t) {
   const it = currentItem();
@@ -1367,7 +1327,7 @@ function renderPlayerBar() {
       <div class="pb-controls">
         <button class="btn btn-ghost btn-icon ${session.shuffle ? 'toggled' : ''}" data-action="shuffle" title="Shuffle upcoming">${icon('shuffle')}</button>
         <button class="btn btn-ghost btn-icon" data-action="prev" ${dis} title="Previous">${icon('prev')}</button>
-        <button class="pb-play" data-action="toggle-play" title="${IS_FILE ? 'Open on YouTube' : P.playing ? 'Pause' : 'Play'} (space)">${icon(P.playing ? 'pause' : 'play', 'icon icon-lg')}</button>
+        <button class="pb-play" data-action="toggle-play" title="${P.playing ? 'Pause' : 'Play'} (space)">${icon(P.playing ? 'pause' : 'play', 'icon icon-lg')}</button>
         <button class="btn btn-ghost btn-icon" data-action="next" ${session.index >= session.queue.length - 1 ? 'disabled' : ''} title="Next">${icon('next')}</button>
         <button class="btn btn-ghost btn-icon pb-hide-sm" data-action="toggle-expand" ${dis} title="Expand video">${icon('expand')}</button>
       </div>
@@ -1377,7 +1337,7 @@ function renderPlayerBar() {
     </div>
     <div class="pb-right">
       ${icon('vol', 'icon pb-vol-icon pb-hide-sm')}
-      <input type="range" class="range pb-vol" id="pb-vol" min="0" max="100" value="${session.volume}" style="--p:${session.volume}%" aria-label="Volume" ${IS_FILE ? 'disabled title="Use YouTube volume controls"' : ''}>
+      <input type="range" class="range pb-vol" id="pb-vol" min="0" max="100" value="${session.volume}" style="--p:${session.volume}%" aria-label="Volume">
       <button class="btn btn-ghost btn-icon" data-action="toggle-queue" title="Queue (${session.queue.length})">${icon('queue')}</button>
     </div>`;
   updateSeekUI();
@@ -2058,6 +2018,42 @@ function renderFavorites() {
 /* ---------------------------------------------------------------------
    17. Map (Leaflet + OpenStreetMap data)
    --------------------------------------------------------------------- */
+/* Basemaps. Default needs no key; CARTO (which now watermarks keyless requests) is optional with a free key. */
+const OSM_ATTR = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
+const MAP_STYLES = {
+  'esri-dark': { label: 'Dark (Esri) — no key needed', layers: [
+    ['https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}', { maxZoom: 16, attribution: 'Tiles &copy; <a href="https://www.esri.com/">Esri</a> &mdash; Esri, HERE, Garmin, &copy; OpenStreetMap contributors' }],
+    ['https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}', { maxZoom: 16, pane: 'labels' }]] },
+  'osm-dark': { label: 'Dark street map (OpenStreetMap) — no key needed', dark: true, layers: [
+    ['https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: OSM_ATTR }]] },
+  'osm': { label: 'Classic street map (OpenStreetMap) — no key needed', layers: [
+    ['https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: OSM_ATTR }]] },
+  'carto-dark': { label: 'Dark Matter (CARTO) — needs a free CARTO key', needsKey: true, layers: [
+    ['https://{s}.basemaps.cartocdn.com/rastertiles/dark_all/{z}/{x}/{y}{r}.png?api_key={key}', { maxZoom: 19, subdomains: 'abcd', attribution: OSM_ATTR + ' &copy; <a href="https://carto.com/attributions">CARTO</a>' }]] },
+};
+function currentMapStyle() {
+  const id = lib.settings.mapStyle in MAP_STYLES ? lib.settings.mapStyle : 'esri-dark';
+  return id === 'carto-dark' && !lib.settings.cartoKey ? 'esri-dark' : id;
+}
+/** Add the chosen basemap; if its tiles keep failing, fall back to the next no-key style once. */
+function addBasemap(map, styleId = currentMapStyle(), tried = []) {
+  const style = MAP_STYLES[styleId];
+  if (!map.getPane('labels')) { map.createPane('labels'); map.getPane('labels').style.zIndex = 450; map.getPane('labels').style.pointerEvents = 'none'; }
+  $('#map').classList.toggle('map-darken', !!style.dark);
+  let errors = 0, loaded = 0, switched = false;
+  const layers = style.layers.map(([url, opts]) => L.tileLayer(url.replace('{key}', encodeURIComponent(lib.settings.cartoKey || '')), opts).addTo(map));
+  layers[0].on('tileload', () => { loaded++; });
+  layers[0].on('tileerror', () => {
+    errors++;
+    if (switched || loaded || errors < 4) return;
+    const next = ['esri-dark', 'osm-dark'].find(s => s !== styleId && !tried.includes(s));
+    if (!next) return;
+    switched = true;
+    layers.forEach(l => map.removeLayer(l));
+    toast(`Map tiles from ${esc(style.label.split(' —')[0])} didn't load — switched to ${esc(MAP_STYLES[next].label.split(' —')[0])}.`);
+    addBasemap(map, next, [...tried, styleId]);
+  });
+}
 function renderMap() {
   const all = catalogue(), mapped = all.filter(c => c.lat != null && c.lng != null), unmapped = all.length - mapped.length;
   $('#view').innerHTML = `<div class="kicker">Where it happened</div><h1 class="view-title">The Map</h1>
@@ -2066,10 +2062,7 @@ function renderMap() {
   if (!window.L) { $('#map').outerHTML = emptyState('The map library couldn\'t load', 'Check your internet connection and reload.'); return; }
   if (mapInst) { mapInst.remove(); mapInst = null; }
   mapInst = L.map('map', { worldCopyJump: true, zoomControl: true });
-  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-    maxZoom: 18, subdomains: 'abcd',
-    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
-  }).addTo(mapInst);
+  addBasemap(mapInst);
   const groups = new Map();
   for (const c of mapped) { const k = `${c.lat.toFixed(3)},${c.lng.toFixed(3)}`; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(c); }
   const pts = [];
@@ -2692,9 +2685,22 @@ function renderSettings() {
     attached: Object.values(lib.seedOverrides).filter(o => o.sources && o.sources.some(s => s.videoId)).length, dead: Object.keys(lib.deadLinks).length };
   $('#view').innerHTML = `<div class="kicker">Settings</div><h1 class="view-title">The back room</h1>
     <p class="view-sub">Your library lives only in this browser. Export it now and then — it's your archive.</p>
-    ${IS_FILE ? `<div class="warnbox" style="margin-bottom:20px"><b>Local-file playback.</b> Play opens videos on YouTube. In-page playback and automatic queue advancement require a web address. Export your library before moving to a different file or address. <button class="btn btn-sm" data-action="show-file-help">Show the fix</button></div>` : ''}
+    ${IS_FILE ? `<div class="warnbox" style="margin-bottom:20px"><b>Opened as a local file.</b> Browsing works, but YouTube won't play videos from <code>file://</code> (error 153). The red box at the top has the one-minute fix, including <code>python3 -m http.server 8000</code>. <button class="btn btn-sm" data-action="show-file-help">Show the fix</button></div>` : ''}
 
     ${autoSettingsHtml()}
+
+    <section class="panel form-card">
+      <div class="form-card-title">Map style</div>
+      <p class="small muted" style="margin:0 0 12px">The map needs no key. CARTO's Dark Matter is optional — CARTO began requiring a free key in 2026 and watermarks tiles without one.</p>
+      <div class="flex gap-2 flex-wrap items-center" style="max-width:720px">
+        <select class="select" id="set-map-style" style="width:auto">${Object.entries(MAP_STYLES).map(([id, s]) => `<option value="${id}" ${lib.settings.mapStyle === id ? 'selected' : ''}>${esc(s.label)}</option>`).join('')}</select>
+      </div>
+      <div id="carto-key-row" style="margin-top:12px;${lib.settings.mapStyle === 'carto-dark' ? '' : 'display:none'}">
+        <div class="small muted" style="margin-bottom:8px">Get a free key at <a href="https://www.carto.com/basemaps/apikey/" target="_blank" rel="noopener">carto.com/basemaps/apikey</a>, then paste it here. Stored only in this browser.</div>
+        <div class="flex gap-2 flex-wrap" style="max-width:680px"><input class="input" id="set-carto-key" type="password" autocomplete="off" placeholder="CARTO basemaps API key" value="${esc(lib.settings.cartoKey)}" style="flex:1;min-width:240px">
+          <button class="btn btn-gold" data-action="save-carto-key">Save key</button></div>
+      </div>
+    </section>
 
     <section class="panel form-card">
       <div class="form-card-title">Eras</div>
@@ -2723,6 +2729,11 @@ function renderSettings() {
         <button class="btn btn-ghost btn-danger" data-action="clear-history" ${counts.hist ? '' : 'disabled'}>Clear listening history</button></div>
     </section>`;
   $('#import-file').addEventListener('change', e => { const f = e.target.files[0]; if (f) importLibrary(f); e.target.value = ''; });
+  $('#set-map-style').addEventListener('change', e => {
+    lib.settings.mapStyle = e.target.value; saveLibrary(false);
+    $('#carto-key-row').style.display = e.target.value === 'carto-dark' ? '' : 'none';
+    toast(e.target.value === 'carto-dark' && !lib.settings.cartoKey ? 'Paste a CARTO key to use Dark Matter — until then the map uses the Esri dark style.' : 'Map style saved.');
+  });
   const en = $('#set-auto-enabled'), per = $('#set-auto-per');
   if (en) en.addEventListener('change', () => { lib.auto.enabled = en.checked; saveLibrary(false); toast(en.checked ? 'Automatic daily search is on.' : 'Automatic daily search is off — you can still run it by hand.'); });
   if (per) per.addEventListener('change', () => { lib.auto.perRun = Math.min(95, Math.max(5, parseInt(per.value, 10) || 40)); per.value = lib.auto.perRun; saveLibrary(false); });
@@ -3088,11 +3099,17 @@ const ACTIONS = {
   'eras-down': el => { readEraRowsFromDom(); const i = +el.dataset.i; [eraRows[i + 1], eraRows[i]] = [eraRows[i], eraRows[i + 1]]; rerenderEraRows(); },
   'eras-del': el => { readEraRowsFromDom(); eraRows.splice(+el.dataset.i, 1); rerenderEraRows(); },
   'eras-save': () => saveEras(),
+  'save-carto-key': () => { lib.settings.cartoKey = $('#set-carto-key').value.trim(); saveLibrary(false); toast(lib.settings.cartoKey ? 'CARTO key saved — the map now uses Dark Matter.' : 'CARTO key cleared — the map uses the Esri dark style.'); },
   'eras-reset': () => { if (!confirm('Reset the era list to the defaults? Labels already on concerts are kept.')) return; lib.eras = null; saveLibrary(); renderSettings(); toast('Era list reset to defaults.'); },
   'check-links': () => checkLinks(),
   'clear-dead': () => { lib.deadLinks = {}; saveLibrary(); renderSettings(); refresh(); toast('Dead-link flags cleared.'); },
   'export': () => exportLibrary(),
-  'open-yt': () => openCurrentOnYouTube(),
+  'open-yt': () => {
+    const it = currentItem(); if (!it) return;
+    const t = Math.floor(P.time || 0);
+    if (P.yt && P.ready && P.playing) P.yt.pauseVideo();
+    window.open(`https://www.youtube.com/watch?v=${it.videoId}${t ? '&t=' + t + 's' : ''}`, '_blank', 'noopener');
+  },
   'show-file-help': () => { renderFileBanner(true); window.scrollTo({ top: 0, behavior: 'smooth' }); },
   'hide-file-help': () => { try { sessionStorage.setItem('tambourine.fileBanner', 'min'); } catch { /* ignore */ } renderFileBanner(); },
   'copy-cmd': () => {
